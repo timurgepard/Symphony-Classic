@@ -24,9 +24,10 @@ torch.cuda.empty_cache()
 print(device)
 
 learning_rate = 1e-4
-explore_time, times = 10000, 50
+explore_time, times = 20000, 50
 capacity = explore_time * times
-batch_size = q_dist = 192
+h_dim = 432
+batch_size = q_dist = 432
 alpha, tau = phi_, 0.001
 num_episodes = 100000
 limit_test = 1000
@@ -52,7 +53,8 @@ action_dim= env.action_space.shape[0]
 #max_action = torch.FloatTensor(env.action_space.high) if env.action_space.is_bounded() else torch.ones(action_dim)
 max_action = torch.ones(action_dim)
 
-algo = Symphony(capacity, state_dim, action_dim, alpha, tau, q_dist, batch_size, max_action, state_high, state_low, learning_rate, device)
+
+algo = Symphony(capacity, state_dim, action_dim, h_dim, alpha, tau, q_dist, batch_size, max_action, state_high, state_low, learning_rate, device)
 
 
 print("action_dim: ", action_dim, "state_dim: ", state_dim)
