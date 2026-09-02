@@ -98,16 +98,17 @@ class ReHAE(jit.ScriptModule):
 #ReSine Activation Function
 # jit.ScriptModule -> JIT C++ graph
 class ReSine(jit.ScriptModule):
-    def __init__(self, hidden_dim=384):
+    def __init__(self, hidden_dim=256):
         super(ReSine, self).__init__()
         k = 1/math.sqrt(hidden_dim)
-        self.b_ = nn.Parameter(data=2.0*k*torch.rand(hidden_dim)-k, requires_grad=True)
+        self.sb_ = nn.Parameter(data=2.0*k*torch.rand(2*hidden_dim)-k, requires_grad=True)
 
 
     @jit.script_method
     def forward(self, x):
-        x = torch.sin(x)
-        return x * torch.sigmoid(x/torch.sigmoid(self.b_))
+        s, b_ = torch.sigmoid(self.sb_).chunk(2, dim=-1)
+        x = s*torch.sin(x/s)
+        return x * torch.sigmoid(x/(b_*s))
 
 
 
@@ -123,7 +124,8 @@ class GradientDropout(jit.ScriptModule):
     @jit.script_method
     def forward(self, x):
         if not self.training or not self.drop: return x
-        mask = (torch.rand_like(x) > 0.5).float()
+        p = torch.sigmoid(torch.randn_like(x))
+        mask = (torch.rand_like(x) > p).float()
         return mask * x + (1.0 - mask) * x.detach()
 
 
@@ -156,13 +158,13 @@ class Swaddling(jit.ScriptModule):
 
 
 class FourierSeries(jit.ScriptModule):
-    def __init__(self, f_in, z_dim):
+    def __init__(self, f_in, h_dim, z_dim):
         super(FourierSeries, self).__init__()
 
         self.ffw = nn.Sequential(
-            nn.Linear(f_in, 384),
-            ReSine(384),
-            nn.Linear(384, z_dim)
+            nn.Linear(f_in, h_dim),
+            ReSine(h_dim),
+            nn.Linear(h_dim, z_dim)
         )
 
     @jit.script_method
@@ -173,16 +175,16 @@ class FourierSeries(jit.ScriptModule):
 
 
 class FeedForward(jit.ScriptModule):
-    def __init__(self, f_in, z_dim, f_out, drop):
+    def __init__(self, f_in, h_dim, z_dim, f_out, drop):
         super().__init__()
 
 
         self.ffw = nn.Sequential(
-            nn.Linear(f_in, 384),
-            nn.LayerNorm(384),
-            nn.Linear(384, 384),
-            ReSine(384),
-            nn.Linear(384, z_dim),
+            nn.Linear(f_in, h_dim),
+            nn.LayerNorm(h_dim),
+            nn.Linear(h_dim, h_dim),
+            ReSine(h_dim),
+            nn.Linear(h_dim, z_dim),
             GradientDropout(drop)
         )
 
@@ -199,15 +201,15 @@ class FeedForward(jit.ScriptModule):
 
 
 class FeatureExtractor(jit.ScriptModule):
-    def __init__(self, state_dim, z_dim, action_dim, drop):
+    def __init__(self, state_dim, h_dim, z_dim, action_dim, drop):
         super(FeatureExtractor, self).__init__()
 
 
 
-        self.ffw = FourierSeries(state_dim, z_dim)
+        self.ffw = FourierSeries(state_dim, h_dim, z_dim)
         self.norm1 = nn.RMSNorm(state_dim + z_dim)
 
-        self.rew = FeedForward(state_dim + z_dim + action_dim, z_dim, 1, drop)
+        self.rew = FeedForward(state_dim + z_dim + action_dim, h_dim, z_dim, 1, drop)
         self.norm2 = nn.RMSNorm(state_dim + action_dim + 2*z_dim)
 
 
@@ -234,11 +236,11 @@ class FeatureExtractor(jit.ScriptModule):
 
 # jit.ScriptModule -> JIT C++ graph
 class Actor(jit.ScriptModule):
-    def __init__(self, state_dim, z_dim, action_dim, drop=True):
+    def __init__(self, state_dim, h_dim, z_dim, action_dim, drop=True):
         super().__init__()
 
         self.action_dim = action_dim
-        self.Adam = FeedForward(state_dim, z_dim, 3*action_dim, drop)
+        self.Adam = FeedForward(state_dim, h_dim, z_dim, 3*action_dim, drop)
 
 
     @jit.script_method
@@ -250,14 +252,14 @@ class Actor(jit.ScriptModule):
 
 # jit.ScriptModule -> JIT C++ graph
 class Critic(jit.ScriptModule):
-    def __init__(self, state_action_dim, z_dim, q_dist, drop=True):
+    def __init__(self, state_action_dim, h_dim, z_dim, q_dist, drop=True):
         super().__init__()
 
         q_nodes = q_dist//3
 
-        self.Yahweh = FeedForward(state_action_dim, z_dim, q_nodes, drop)
-        self.Yeshua = FeedForward(state_action_dim, z_dim, q_nodes, drop)
-        self.RuachY = FeedForward(state_action_dim, z_dim, q_nodes, drop)
+        self.Yahweh = FeedForward(state_action_dim, h_dim, z_dim, q_nodes, drop)
+        self.Yeshua = FeedForward(state_action_dim, h_dim, z_dim, q_nodes, drop)
+        self.RuachY = FeedForward(state_action_dim, h_dim, z_dim, q_nodes, drop)
         self.God = nn.ModuleList([self.Yahweh, self.Yeshua, self.RuachY])
  
 
@@ -270,16 +272,16 @@ class Critic(jit.ScriptModule):
 
 # jit.ScriptModule -> JIT C++ graph
 class ActorCritic(jit.ScriptModule):
-    def __init__(self, state_dim, action_dim, alpha, q_dist, max_action, drop=True):
+    def __init__(self, state_dim, action_dim, h_dim, alpha, q_dist, max_action, drop=True):
         super().__init__()
 
-        fn = q_dist//8
+        fn = h_dim//12
         z_dim = q_dist
 
 
-        self.fe = FeatureExtractor(state_dim, fn, action_dim, drop)
+        self.fe = FeatureExtractor(state_dim, h_dim, fn, action_dim, drop)
 
-        self.actor = Actor(state_dim + fn, z_dim , action_dim, drop)
+        self.actor = Actor(state_dim + fn, h_dim, z_dim, action_dim, drop)
         self.register_buffer('a_max', torch.as_tensor(max_action, dtype=torch.float32))
 
 
@@ -288,7 +290,7 @@ class ActorCritic(jit.ScriptModule):
 
 
 
-        self.critic = Critic(state_dim + action_dim + 2*fn, z_dim, q_dist, drop)
+        self.critic = Critic(state_dim + action_dim + 2*fn, h_dim, z_dim, q_dist, drop)
         
         indexes = torch.arange(0, q_dist, 1)/q_dist
         weights = torch.exp(-(torch.abs(1-phi/2-indexes)/phi_)**(2*math.e))
@@ -313,8 +315,8 @@ class ActorCritic(jit.ScriptModule):
         self.q_ema.mul_(self.alpha).add_(q_soft_detached.mean(), alpha=self._alpha)
         return  q_soft, q_soft_detached, self.q_ema.clone()
 
-    # ===============================================================================
-    # Methods created for simplicity and readability:
+    # helper functions ===========================================================
+
     @jit.script_method
     def actor_play(self, state, active:float = 1.0, test:float=0.0):
         A, S, B = self.actor(self.fe.z(state))
@@ -329,16 +331,18 @@ class ActorCritic(jit.ScriptModule):
         return q_pred, r_pred
         
 
+
     @jit.script_method
     def critic_info(self, state, action):
         q =  self.critic(self.fe.za(state, action))
         q_std = q.std(dim=-1, keepdim=True)/q.detach().pow(2).mean(dim=-1, keepdim=True).sqrt()
         return self.q_ema.clone(), q_std
+    
+    # ============================================================
 
-    # ===============================================================================
 
 class Nets(jit.ScriptModule):
-    def __init__(self, state_dim, action_dim, alpha, tau, q_dist, batch_size, max_action, capacity, learning_rate, device):
+    def __init__(self, state_dim, action_dim, h_dim, alpha, tau, q_dist, batch_size, max_action, capacity, learning_rate, device):
         super(Nets, self).__init__()
 
         self.state_dim = state_dim
@@ -352,16 +356,16 @@ class Nets(jit.ScriptModule):
         self.tau = tau
 
 
-        self.init(state_dim, action_dim, alpha, q_dist, max_action, device)
+        self.init(state_dim, action_dim, h_dim, alpha, q_dist, max_action, device)
         self.replay_buffer = ReplayBuffer(capacity, state_dim, action_dim, batch_size, device)
         self.optimizer = Adam(self.online.parameters(), lr=learning_rate, betas=(alpha, 1-tau))
 
 
 
-    def init(self, state_dim, action_dim, alpha, q_dist, max_action, device):
+    def init(self, state_dim, action_dim, h_dim, alpha, q_dist, max_action, device):
 
-        self.online = ActorCritic(state_dim, action_dim, alpha, q_dist, max_action, drop=True).to(device)
-        self.target = ActorCritic(state_dim, action_dim, alpha, q_dist, max_action, drop=False).to(device)
+        self.online = ActorCritic(state_dim, action_dim, h_dim, alpha, q_dist, max_action, drop=True).to(device)
+        self.target = ActorCritic(state_dim, action_dim, h_dim, alpha, q_dist, max_action, drop=False).to(device)
         self.target.load_state_dict(self.online.state_dict())
         for param in self.target.parameters(): param.requires_grad = False
                     
@@ -371,9 +375,11 @@ class Nets(jit.ScriptModule):
     def tau_update(self):
 
 
-        for target_param, param in zip(self.target.parameters(), self.online.parameters()):
+        for target_param, param in zip(self.target.critic.parameters(), self.online.critic.parameters()):
             target_param.lerp_(param, self.tau)
 
+        for target_param, param in zip(self.target.fe.parameters(), self.online.fe.parameters()):
+            target_param.lerp_(param, self.tau)
 
 
     @jit.script_method
@@ -388,7 +394,6 @@ class Nets(jit.ScriptModule):
         sw_and_beta_loss, sw_value = self.sw(next_scale, next_beta)
         q_target = reward + not_done_gamma * (q_next_target_value - sw_value)
         q_pred, r_pred = self.online.critic_direct(state, action)
-
 
         net_loss = self.rehse(r_pred - reward) + self.rehse(q_pred-q_target) - self.rehae((q_next_target - q_next_ema)/q_next_ema.abs()) + sw_and_beta_loss
         net_loss.backward()
@@ -406,14 +411,14 @@ class Nets(jit.ScriptModule):
 
 
 class Symphony(object):
-    def __init__(self, capacity, state_dim, action_dim, alpha, tau, q_dist, batch_size, max_action, state_high, state_low, learning_rate, device):
+    def __init__(self, capacity, state_dim, action_dim, h_dim, alpha, tau, q_dist, batch_size, max_action, state_high, state_low, learning_rate, device):
         super(Symphony, self).__init__()
 
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.device = device
         
-        self.nets = Nets(state_dim, action_dim, alpha, tau, q_dist, batch_size, max_action, capacity, learning_rate, device)
+        self.nets = Nets(state_dim, action_dim, h_dim, alpha, tau, q_dist, batch_size, max_action, capacity, learning_rate, device)
 
     
     def select_action(self, state, active = True, test=False):
@@ -433,6 +438,10 @@ class Symphony(object):
 
     def train(self):
         torch.manual_seed(random.randint(0,2**32-1))
+        self.update()
+
+
+    def update(self):
         self.nets.optimizer.zero_grad(set_to_none=True)
         self.nets.update()
         self.nets.optimizer.step()
